@@ -1,0 +1,7 @@
+{
+  "name": "OrchestrIA",
+  "description": "The Intelligent Project Management Co-Pilot. A 'Chief of Staff' agent that synthesizes tasks, orchestrates schedules, and forecasts project risks using Gemini AI.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
