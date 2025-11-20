@@ -1,143 +1,222 @@
-import { GoogleGenAI, Chat, FunctionDeclaration, Type } from "@google/genai";
-import { Task, Project, CalendarEvent } from '../types';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Robustly access the API key, handling cases where process or env might be undefined
 const getApiKey = () => {
-  try {
-    // 1. Check window.process (Browser Polyfills via index.html)
-    if (typeof window !== 'undefined' && (window as any).process?.env?.API_KEY) {
-      return (window as any).process.env.API_KEY;
-    }
-    // 2. Check standard process.env (Node/Build tools)
-    // We check typeof process to avoid ReferenceError in strict browser envs
-    try {
-        if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
-            return process.env.API_KEY;
-        }
-    } catch (e) {
-        // Ignore access errors
-    }
-    return '';
-  } catch (e) {
-    console.warn("Error reading API Key from environment", e);
-    return '';
-  }
+  return import.meta.env.VITE_GEMINI_API_KEY || "";
 };
 
-const API_KEY = getApiKey();
+const genAI = new GoogleGenerativeAI(getApiKey());
 
-// Helper to get AI instance
-const getAI = () => {
-  if (!API_KEY) {
-    // Only warn once or when strictly needed to avoid console spam on load if keys aren't ready
-    // console.warn("No API Key found in environment. AI features will be disabled.");
+// Tool definitions for function calling
+const tools = [{
+  functionDeclarations: [
+    {
+      name: "updateTaskStatus",
+      description: "Update the status of a task",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: {
+            type: "string",
+            description: "The ID of the task to update"
+          },
+          status: {
+            type: "string",
+            enum: ["todo", "in-progress", "completed"],
+            description: "The new status for the task"
+          }
+        },
+        required: ["taskId", "status"]
+      }
+    },
+    {
+      name: "createTask",
+      description: "Create a new task",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "The title of the task"
+          },
+          description: {
+            type: "string",
+            description: "Detailed description of the task"
+          },
+          priority: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+            description: "Priority level of the task"
+          },
+          estimatedMinutes: {
+            type: "number",
+            description: "Estimated time to complete in minutes"
+          }
+        },
+        required: ["title", "priority"]
+      }
+    },
+    {
+      name: "rescheduleEvent",
+      description: "Reschedule a calendar event",
+      parameters: {
+        type: "object",
+        properties: {
+          eventId: {
+            type: "string",
+            description: "The ID of the event to reschedule"
+          },
+          newStartTime: {
+            type: "string",
+            description: "New start time in ISO format"
+          },
+          newEndTime: {
+            type: "string",
+            description: "New end time in ISO format"
+          }
+        },
+        required: ["eventId", "newStartTime", "newEndTime"]
+      }
+    }
+  ]
+}];
+
+// System instruction for the AI
+const systemInstruction = `You are OrchestrIA, an AI assistant for project and task management.
+Your goal is to help users manage tasks, schedule, and projects.
+
+DATA CONTEXT:
+You have access to tools to modify tasks and calendar events.
+Always use tools when the user implies an action (e.g., "mark that done", "move the meeting").
+
+When you call a tool, provide a short confirmation message to the user after the tool execution result is returned to you.
+
+Current Date: ${new Date().toISOString()}`;
+
+// Create chat session for AIChat component
+export const createChatSession = () => {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.warn("Gemini API key not found");
     return null;
   }
-  return new GoogleGenAI({ apiKey: API_KEY });
-};
-
-// --- Tool Definitions ---
-
-const tools: FunctionDeclaration[] = [
-  {
-    name: 'updateTaskStatus',
-    description: 'Update the status of a specific task to todo, in_progress, or done.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        taskId: { type: Type.STRING, description: "The ID of the task (e.g., 't1')" },
-        status: { type: Type.STRING, description: "The new status: 'todo', 'in_progress', or 'done'" }
-      },
-      required: ['taskId', 'status']
-    }
-  },
-  {
-    name: 'createTask',
-    description: 'Create a new task in the system.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        title: { type: Type.STRING, description: "Title of the task" },
-        priority: { type: Type.STRING, description: "Priority: CRITICAL, HIGH, MEDIUM, LOW" },
-        estimatedMinutes: { type: Type.NUMBER, description: "Estimated duration in minutes" }
-      },
-      required: ['title', 'priority']
-    }
-  },
-  {
-    name: 'rescheduleEvent',
-    description: 'Reschedule a calendar event to a new time.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        eventId: { type: Type.STRING, description: "The ID of the event" },
-        newStartTime: { type: Type.STRING, description: "ISO String for new start time" },
-        newEndTime: { type: Type.STRING, description: "ISO String for new end time" }
-      },
-      required: ['eventId', 'newStartTime', 'newEndTime']
-    }
-  }
-];
-
-// --- Logic ---
-
-export const generateMorningBriefing = async (
-  tasks: Task[],
-  events: CalendarEvent[],
-  projects: Project[]
-): Promise<string> => {
-  const ai = getAI();
-  if (!ai) return "Welcome back. Please configure your API Key to see your intelligent briefing.";
-
-  const prompt = `
-    You are OrchestrIA, a Chief of Staff for a busy executive. 
-    
-    Context:
-    Tasks: ${JSON.stringify(tasks.map(t => ({ title: t.title, priority: t.priority, due: t.dueDate })))}
-    Calendar Today: ${JSON.stringify(events.map(e => ({ title: e.title, start: e.start })))}
-    Projects: ${JSON.stringify(projects)}
-
-    Goal:
-    Generate a concise, 3-sentence "Morning Briefing". 
-    1. Highlight the absolute most critical task.
-    2. Mention any schedule tightness or focus block recommendations.
-    3. Flag one project risk if any exists.
-    
-    Tone: Professional, crisp, actionable.
-  `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.5-pro",
+      tools: tools,
+      systemInstruction: systemInstruction
     });
-    return response.text || "Unable to generate briefing.";
+
+    const chat = model.startChat({
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 2048,
+      }
+    });
+
+    return chat;
   } catch (error) {
-    console.error("Briefing Error:", error);
-    return "Good morning. I'm unable to connect to the synthesis engine right now.";
+    console.error("Error creating chat session:", error);
+    return null;
   }
 };
 
-export const createChatSession = (): Chat | null => {
-  const ai = getAI();
-  if (!ai) return null;
+// Generate morning briefing based on tasks, events, and projects
+export const generateMorningBriefing = async (tasks: any[], events: any[], projects: any[]) => {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    return "AI briefing unavailable. Please configure your Gemini API key.";
+  }
 
-  return ai.chats.create({
-    model: 'gemini-2.5-flash',
-    config: {
-      tools: [{ functionDeclarations: tools }],
-      systemInstruction: `
-        You are OrchestrIA, a highly capable "Chief of Staff" AI agent.
-        Your goal is to help them manage tasks, schedule, and projects.
-        
-        DATA CONTEXT:
-        You have access to tools to modify tasks and calendar events.
-        Always use tools when the user implies an action (e.g., "mark that done", "move the meeting").
-        
-        When you call a tool, provide a short confirmation message to the user after the tool execution result is returned to you.
-        
-        Current Date: ${new Date().toISOString()}
-      `
+  try {
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.5-pro"
+    });
+
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+    
+    // Prepare context
+    const taskSummary = tasks.slice(0, 5).map(t => 
+      `- ${t.title} (${t.status}, priority: ${t.priority})`
+    ).join('\n');
+
+    const eventSummary = events.slice(0, 5).map(e => 
+      `- ${e.title} at ${new Date(e.start).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`
+    ).join('\n');
+
+    const projectSummary = projects.slice(0, 3).map(p => 
+      `- ${p.name}: ${p.tasksCompleted}/${p.totalTasks} tasks completed`
+    ).join('\n');
+
+    const prompt = `Generate a concise, professional morning briefing for ${today}. 
+    
+Keep it under 3 sentences. Focus on:
+1. What needs attention today
+2. Key meetings or deadlines
+3. Overall workload assessment
+
+Current Tasks:
+${taskSummary || 'No active tasks'}
+
+Today's Events:
+${eventSummary || 'No events scheduled'}
+
+Active Projects:
+${projectSummary || 'No active projects'}
+
+Write in a calm, executive assistant tone. Be specific but brief.`;
+
+    const result = await model.generateContent(prompt);
+    const response = result.response;
+    return response.text();
+  } catch (error) {
+    console.error("Error generating morning briefing:", error);
+    return "Good morning! Your tasks and schedule are ready for review.";
+  }
+};
+
+// Alternative API for direct message generation (if needed elsewhere)
+export const generateAIResponse = async (messages: any[]) => {
+  try {
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.5-pro",
+      tools: tools,
+      systemInstruction: systemInstruction
+    });
+
+    const chat = model.startChat({
+      history: messages.slice(0, -1).map(msg => ({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.content }]
+      })),
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 2048,
+      }
+    });
+
+    const lastMessage = messages[messages.length - 1];
+    const result = await chat.sendMessage(lastMessage.content);
+    const response = result.response;
+
+    // Handle function calls
+    if (response.functionCalls && response.functionCalls.length > 0) {
+      return {
+        text: response.text() || "I'll help you with that.",
+        functionCalls: response.functionCalls
+      };
     }
-  });
+
+    return {
+      text: response.text(),
+      functionCalls: []
+    };
+  } catch (error) {
+    console.error("Error generating AI response:", error);
+    throw error;
+  }
 };

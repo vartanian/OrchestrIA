@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, X, Mic } from 'lucide-react';
 import { ChatMessage, Task, Priority, Source } from '../types';
-import { Chat, GenerateContentResponse } from "@google/genai";
 import { createChatSession } from '../services/geminiService';
 import { useStore } from '../context/StoreContext';
 
@@ -22,7 +21,7 @@ const AIChat: React.FC<AIChatProps> = ({ isOpen, onClose }) => {
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const chatSession = useRef<Chat | null>(null);
+  const chatSession = useRef<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Initialize chat
@@ -95,14 +94,8 @@ const AIChat: React.FC<AIChatProps> = ({ isOpen, onClose }) => {
         }));
 
         try {
-            const resultResponse = await chatSession.current.sendMessageStream({ message: parts });
-            
-            let fullText = "";
-            for await (const chunk of resultResponse) {
-                const c = chunk as GenerateContentResponse;
-                if (c.text) fullText += c.text;
-            }
-            return fullText;
+            const resultResponse = await chatSession.current.sendMessage(parts);
+            return resultResponse.response.text() || "Action completed.";
         } catch (e) {
             console.error("Error sending tool response", e);
             return "I encountered an error processing the action results.";
@@ -149,7 +142,7 @@ const AIChat: React.FC<AIChatProps> = ({ isOpen, onClose }) => {
         User Request: ${userText}
       `;
 
-      const result = await chatSession.current.sendMessageStream({ message: contextMsg });
+      const result = await chatSession.current.sendMessageStream(contextMsg);
       
       let fullResponse = "";
       
@@ -157,17 +150,18 @@ const AIChat: React.FC<AIChatProps> = ({ isOpen, onClose }) => {
       const botMsgId = (Date.now() + 1).toString();
       setMessages(prev => [...prev, { id: botMsgId, role: 'model', text: '', timestamp: new Date(), isTyping: true }]);
 
-      for await (const chunk of result) {
-        const c = chunk as GenerateContentResponse;
+      for await (const chunk of result.stream) {
+        const chunkText = chunk.text();
         
         // Handle Function Calls
-        if (c.functionCalls && c.functionCalls.length > 0) {
-            const toolResultText = await handleToolCalls(c.functionCalls);
+        const functionCalls = chunk.functionCalls();
+        if (functionCalls && functionCalls.length > 0) {
+            const toolResultText = await handleToolCalls(functionCalls);
             if (toolResultText) fullResponse += toolResultText;
         } 
         // Handle Text
-        else if (c.text) {
-            fullResponse += c.text;
+        else if (chunkText) {
+            fullResponse += chunkText;
         }
 
         // Live Update UI
